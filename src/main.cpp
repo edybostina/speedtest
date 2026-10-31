@@ -1,6 +1,24 @@
-#include <print>
+#include "socket.hpp"
 
-int main() {
-  std::print("hi\n");
-  return 0;
+#include <print>
+#include <string_view>
+
+int main(int argc, char *argv[])
+{
+    if (argc != 4 || std::string_view(argv[1]) != "recv") {
+        std::println(stderr, "usage: speedtest recv HOST PORT");
+        return 2;
+    }
+
+    const std::string host = argv[2];
+    const std::string port = argv[3];
+
+    auto sock = connect_to(host, port);
+    if (!sock) {
+        std::println(stderr, "{}", sock.error());
+        return 1;
+    }
+
+    std::println(stderr, "connected to {}:{}", host, port);
+    return 0;
 }
