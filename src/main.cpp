@@ -4,30 +4,82 @@
 #include <print>
 #include <string_view>
 
+namespace {
+constexpr std::string_view USAGE = "usage: speedtest recv HOST PORT\n"
+                                   "       speedtest send PORT";
+
+void print_usage()
+{
+    std::println(stderr, "{}", USAGE);
+}
+} // namespace
+
 int main(int argc, char *argv[])
 {
-    if (argc != 4 || std::string_view(argv[1]) != "recv") {
-        std::println(stderr, "usage: speedtest recv HOST PORT");
+    if (argc < 2) {
+        print_usage();
         return 2;
     }
 
-    const std::string host = argv[2];
-    const std::string port = argv[3];
+    const std::string_view mode = argv[1];
 
-    auto sock = connect_to(host, port);
-    if (!sock) {
-        std::println(stderr, "{}", sock.error());
-        return 1;
+    if (mode == "recv") {
+        if (argc != 4) {
+            print_usage();
+            return 2;
+        }
+
+        const std::string host = argv[2];
+        const std::string port = argv[3];
+
+        auto sock = connect_to(host, port);
+        if (!sock) {
+            std::println(stderr, "{}", sock.error());
+            return 1;
+        }
+
+        if (host.find(':') != std::string::npos && !host.starts_with('[')) {
+            std::println(stderr, "connected to [{}]:{}", host, port);
+        } else {
+            std::println(stderr, "connected to {}:{}", host, port);
+        }
+
+        auto result = receive(*sock);
+        if (!result) {
+            std::println(stderr, "{}", result.error());
+            return 1;
+        }
+
+        std::println("{}", *result);
+        return 0;
     }
 
-    std::println(stderr, "connected to {}:{}", host, port);
+    if (mode == "send") {
+        if (argc != 3) {
+            print_usage();
+            return 2;
+        }
 
-    auto result = receive(*sock);
-    if (!result) {
-        std::println(stderr, "{}", result.error());
-        return 1;
+        const std::string port = argv[2];
+
+        auto listener = listen_on(port);
+        if (!listener) {
+            std::println(stderr, "{}", listener.error());
+            return 1;
+        }
+
+        std::println(stderr, "listening on port {}", port);
+
+        auto accepted = accept_from(*listener);
+        if (!accepted) {
+            std::println(stderr, "{}", accepted.error());
+            return 1;
+        }
+
+        std::println(stderr, "accepted connection from {}", accepted->peer);
+        return 0;
     }
 
-    std::println("{}", *result);
-    return 0;
+    print_usage();
+    return 2;
 }

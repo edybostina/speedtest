@@ -54,4 +54,11 @@ public:
     }
 };
 
+struct Accepted {
+    Socket socket;
+    std::string peer;
+};
+
 std::expected<Socket, std::string> connect_to(const std::string &host, const std::string &port);
+std::expected<Socket, std::string> listen_on(const std::string &port);
+std::expected<Accepted, std::string> accept_from(Socket &listener);
