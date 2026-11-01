@@ -8,8 +8,6 @@
 #include <sys/socket.h>
 #include <system_error>
 
-constexpr std::size_t BUFFER_SIZE = 128 * 1024;
-
 std::expected<std::uint64_t, std::string> receive(Socket &socket)
 {
     std::uint64_t total = 0;

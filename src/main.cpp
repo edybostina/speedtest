@@ -1,12 +1,16 @@
 #include "receiver.hpp"
+#include "sender.hpp"
 #include "socket.hpp"
 
+#include <charconv>
+#include <cstdint>
+#include <cstring>
 #include <print>
 #include <string_view>
 
 namespace {
 constexpr std::string_view USAGE = "usage: speedtest recv HOST PORT\n"
-                                   "       speedtest send PORT";
+                                   "       speedtest send PORT BYTES";
 
 void print_usage()
 {
@@ -55,12 +59,21 @@ int main(int argc, char *argv[])
     }
 
     if (mode == "send") {
-        if (argc != 3) {
+        if (argc != 4) {
             print_usage();
             return 2;
         }
 
         const std::string port = argv[2];
+
+        std::uint64_t bytes = 0;
+        const char *bytes_str = argv[3];
+        const char *bytes_end = bytes_str + std::strlen(bytes_str);
+        auto [ptr, ec] = std::from_chars(bytes_str, bytes_end, bytes);
+        if (ec != std::errc{} || ptr != bytes_end) {
+            print_usage();
+            return 2;
+        }
 
         auto listener = listen_on(port);
         if (!listener) {
@@ -77,6 +90,14 @@ int main(int argc, char *argv[])
         }
 
         std::println(stderr, "accepted connection from {}", accepted->peer);
+
+        auto send_res = send_bytes(accepted->socket, bytes);
+        if (!send_res) {
+            std::println(stderr, "{}", send_res.error());
+            return 1;
+        }
+
+        std::println(stderr, "sent {} bytes", bytes);
         return 0;
     }
 

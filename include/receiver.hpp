@@ -1,6 +1,7 @@
 #pragma once
 
 #include "socket.hpp"
+#include "speedtest.hpp"
 
 #include <cstdint>
 #include <expected>
