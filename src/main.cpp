@@ -1,3 +1,4 @@
+#include "receiver.hpp"
 #include "socket.hpp"
 
 #include <print>
@@ -20,5 +21,13 @@ int main(int argc, char *argv[])
     }
 
     std::println(stderr, "connected to {}:{}", host, port);
+
+    auto result = receive(*sock);
+    if (!result) {
+        std::println(stderr, "{}", result.error());
+        return 1;
+    }
+
+    std::println("{}", *result);
     return 0;
 }
