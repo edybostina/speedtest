@@ -1,8 +1,10 @@
 #include "receiver.hpp"
 #include "sender.hpp"
 #include "socket.hpp"
+#include "units.hpp"
 
 #include <charconv>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <print>
@@ -54,7 +56,11 @@ int main(int argc, char *argv[])
             return 1;
         }
 
-        std::println("{}", *result);
+        std::uint64_t bytes = result->bytes;
+        std::chrono::duration<double> seconds = result->elapsed;
+
+        std::println("{} bytes in {:.3f} s = {:.2f} Mbit/s", bytes, seconds.count(),
+                     megabits_per_second(bytes, seconds));
         return 0;
     }
 
