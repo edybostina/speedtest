@@ -7,10 +7,18 @@
 #include <chrono>
 #include <expected>
 #include <string>
+#include <functional>
 
 struct ReceiveResult {
     std::uint64_t bytes;
     std::chrono::steady_clock::duration elapsed;
 };
 
-std::expected<ReceiveResult, std::string> receive(Socket &socket);
+struct IntervalReport {
+    std::chrono::duration<double> start;
+    std::chrono::duration<double> end;
+    std::uint64_t bytes;
+};
+
+std::expected<ReceiveResult, std::string>
+receive(Socket &socket, const std::function<void(const IntervalReport &)> &on_interval = {});

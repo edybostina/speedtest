@@ -50,7 +50,13 @@ int main(int argc, char *argv[])
             std::println(stderr, "connected to {}:{}", host, port);
         }
 
-        auto result = receive(*sock);
+        auto print_interval = [](const IntervalReport &report) {
+            double rate = megabits_per_second(report.bytes, report.end - report.start);
+            std::println("{:7.3f}-{:7.3f} s {:12} bytes {:10.2f} Mbit/s", report.start.count(),
+                         report.end.count(), report.bytes, rate);
+        };
+
+        auto result = receive(*sock, print_interval);
         if (!result) {
             std::println(stderr, "{}", result.error());
             return 1;
@@ -106,9 +112,7 @@ int main(int argc, char *argv[])
         std::chrono::duration<double> last_send = send_res->last_send;
         std::chrono::duration<double> peer_done = send_res->peer_done;
 
-        // std::println(stderr, "sent {} bytes", bytes);
         std::println("last send returned: {}", format_transfer(sent, last_send));
-
         std::println("receiver finished:  {}", format_transfer(sent, peer_done));
         return 0;
     }
