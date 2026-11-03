@@ -18,6 +18,14 @@ void print_usage()
 {
     std::println(stderr, "{}", USAGE);
 }
+
+void print_build_note()
+{
+#ifdef SPEEDTEST_SANITIZED
+    std::println(
+        stderr, "note: ASan/UBSan build, rates are not representative (measure with build-bench/)");
+#endif
+}
 } // namespace
 
 int main(int argc, char *argv[])
@@ -56,6 +64,7 @@ int main(int argc, char *argv[])
                          report.end.count(), report.bytes, rate);
         };
 
+        print_build_note();
         auto result = receive(*sock, print_interval);
         if (!result) {
             std::println(stderr, "{}", result.error());
@@ -102,6 +111,7 @@ int main(int argc, char *argv[])
 
         std::println(stderr, "accepted connection from {}", accepted->peer);
 
+        print_build_note();
         auto send_res = send_bytes(accepted->socket, bytes);
         if (!send_res) {
             std::println(stderr, "{}", send_res.error());

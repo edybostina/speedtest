@@ -64,10 +64,10 @@ receive(Socket &socket, const std::function<void(const IntervalReport &)> &on_in
         ssize_t bytes_read = ::recv(socket.get(), buffer.get(), BUFFER_SIZE, 0);
 
         if (bytes_read == 0) {
-            auto elapsed = std::chrono::steady_clock::now() - start;
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed = now - start;
 
             if (interval_bytes > 0 && on_interval) {
-                auto now = std::chrono::steady_clock::now();
                 on_interval({interval_start - start, now - start, interval_bytes});
             }
             return ReceiveResult{.bytes = total, .elapsed = elapsed};
