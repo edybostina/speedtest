@@ -59,8 +59,7 @@ int main(int argc, char *argv[])
         std::uint64_t bytes = result->bytes;
         std::chrono::duration<double> seconds = result->elapsed;
 
-        std::println("{} bytes in {:.3f} s = {:.2f} Mbit/s", bytes, seconds.count(),
-                     megabits_per_second(bytes, seconds));
+        std::println("{}", format_transfer(bytes, seconds));
         return 0;
     }
 
@@ -103,7 +102,14 @@ int main(int argc, char *argv[])
             return 1;
         }
 
-        std::println(stderr, "sent {} bytes", bytes);
+        std::uint64_t sent = send_res->bytes;
+        std::chrono::duration<double> last_send = send_res->last_send;
+        std::chrono::duration<double> peer_done = send_res->peer_done;
+
+        // std::println(stderr, "sent {} bytes", bytes);
+        std::println("last send returned: {}", format_transfer(sent, last_send));
+
+        std::println("receiver finished:  {}", format_transfer(sent, peer_done));
         return 0;
     }
 

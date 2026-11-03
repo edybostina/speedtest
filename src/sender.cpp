@@ -1,6 +1,7 @@
 #include "sender.hpp"
 #include "receiver.hpp"
 
+#include <chrono>
 #include <system_error>
 #include <format>
 #include <cerrno>
@@ -44,10 +45,13 @@ std::expected<void, std::string> send_all(Socket &sock, std::span<const char> da
     return {}; // great succes!
 }
 
-std::expected<void, std::string> send_bytes(Socket &sock, std::uint64_t total)
+std::expected<SendResult, std::string> send_bytes(Socket &sock, std::uint64_t total)
 {
     std::uint64_t sent = 0;
     auto buffer = std::make_unique<char[]>(BUFFER_SIZE);
+
+    auto start = std::chrono::steady_clock::now();
+
     while (sent < total) {
         std::size_t chunk = static_cast<std::size_t>(
             std::min(total - sent, static_cast<std::uint64_t>(BUFFER_SIZE)));
@@ -59,6 +63,8 @@ std::expected<void, std::string> send_bytes(Socket &sock, std::uint64_t total)
         }
         sent += chunk;
     }
+
+    auto last_send = std::chrono::steady_clock::now() - start;
 
     int rc = ::shutdown(sock.get(), SHUT_WR);
     if (rc != 0) {
@@ -73,5 +79,6 @@ std::expected<void, std::string> send_bytes(Socket &sock, std::uint64_t total)
         return std::unexpected(std::format("receive failed: {}", rec.error()));
     }
 
-    return {};
+    auto peer_done = std::chrono::steady_clock::now() - start;
+    return SendResult{.bytes = sent, .last_send = last_send, .peer_done = peer_done};
 }
