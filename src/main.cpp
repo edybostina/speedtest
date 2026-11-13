@@ -4,21 +4,39 @@
 #include "stats.hpp"
 #include "units.hpp"
 
+#include <algorithm>
 #include <charconv>
 #include <chrono>
 #include <cstdint>
 #include <optional>
 #include <print>
 #include <string_view>
+#include <thread>
 #include <variant>
 #include <vector>
 
 namespace {
-constexpr std::string_view USAGE = "usage: speedtest recv HOST PORT [OMITs]\n"
-                                   "       speedtest send PORT BYTES\n"
-                                   "       speedtest send PORT SECONDSs    (e.g. 10s)";
+constexpr std::string_view USAGE =
+    "usage: speedtest recv HOST PORT [OMITs] [STREAMS]\n"
+    "       speedtest send PORT BYTES [STREAMS]      (BYTES per stream)\n"
+    "       speedtest send PORT SECONDSs [STREAMS]   (e.g. 10s)";
 
 using SendAmount = std::variant<std::uint64_t, std::chrono::seconds>;
+
+std::optional<std::size_t> parse_streams(std::string_view text)
+{
+    std::size_t streams = 0;
+    auto [ptr, ec] = std::from_chars(text.data(), text.data() + text.size(), streams);
+    if (ec != std::errc{} || ptr != text.data() + text.size()) {
+        return std::nullopt;
+    }
+
+    if (streams < 1 || streams > 16) {
+        return std::nullopt;
+    }
+
+    return streams;
+}
 
 std::optional<std::chrono::seconds> parse_seconds(std::string_view text, std::uint64_t min,
                                                   std::uint64_t max)
@@ -80,7 +98,7 @@ int main(int argc, char *argv[])
     const std::string_view mode = argv[1];
 
     if (mode == "recv") {
-        if (argc != 4 && argc != 5) {
+        if (argc < 4 || argc > 6) {
             print_usage();
             return 2;
         }
@@ -89,25 +107,54 @@ int main(int argc, char *argv[])
         const std::string port = argv[3];
 
         std::chrono::seconds omit{0};
-        if (argc == 5) {
-            auto parsed_omit = parse_seconds(argv[4], 0, 60);
-            if (!parsed_omit) {
-                print_usage();
-                return 2;
+        bool has_omit = false;
+        std::size_t streams = 1;
+        bool has_streams = false;
+
+        for (int i = 4; i < argc; ++i) {
+            std::string_view arg = argv[i];
+            if (arg.ends_with('s')) {
+                if (has_omit) {
+                    print_usage();
+                    return 2;
+                }
+                auto parsed_omit = parse_seconds(arg, 0, 60);
+                if (!parsed_omit) {
+                    print_usage();
+                    return 2;
+                }
+                omit = *parsed_omit;
+                has_omit = true;
+            } else {
+                if (has_streams) {
+                    print_usage();
+                    return 2;
+                }
+                auto parsed_streams = parse_streams(arg);
+                if (!parsed_streams) {
+                    print_usage();
+                    return 2;
+                }
+                streams = *parsed_streams;
+                has_streams = true;
             }
-            omit = *parsed_omit;
         }
 
-        auto sock = connect_to(host, port);
-        if (!sock) {
-            std::println(stderr, "{}", sock.error());
-            return 1;
-        }
+        std::vector<Socket> sockets;
+        sockets.reserve(streams);
+        for (std::size_t i = 0; i < streams; ++i) {
+            auto sock = connect_to(host, port);
+            if (!sock) {
+                std::println(stderr, "{}", sock.error());
+                return 1;
+            }
 
-        if (host.find(':') != std::string::npos && !host.starts_with('[')) {
-            std::println(stderr, "connected to [{}]:{}", host, port);
-        } else {
-            std::println(stderr, "connected to {}:{}", host, port);
+            if (host.find(':') != std::string::npos && !host.starts_with('[')) {
+                std::println(stderr, "connected to [{}]:{}", host, port);
+            } else {
+                std::println(stderr, "connected to {}:{}", host, port);
+            }
+            sockets.push_back(std::move(*sock));
         }
 
         std::uint64_t kept_bytes = 0;
@@ -131,7 +178,7 @@ int main(int argc, char *argv[])
         };
 
         print_build_note();
-        auto result = receive(*sock, print_interval);
+        auto result = receive(sockets, print_interval);
         if (!result) {
             std::println(stderr, "{}", result.error());
             return 1;
@@ -158,7 +205,7 @@ int main(int argc, char *argv[])
     }
 
     if (mode == "send") {
-        if (argc != 4) {
+        if (argc != 4 && argc != 5) {
             print_usage();
             return 2;
         }
@@ -171,6 +218,16 @@ int main(int argc, char *argv[])
             return 2;
         }
 
+        std::size_t streams = 1;
+        if (argc == 5) {
+            auto parsed_streams = parse_streams(argv[4]);
+            if (!parsed_streams) {
+                print_usage();
+                return 2;
+            }
+            streams = *parsed_streams;
+        }
+
         auto listener = listen_on(port);
         if (!listener) {
             std::println(stderr, "{}", listener.error());
@@ -179,29 +236,59 @@ int main(int argc, char *argv[])
 
         std::println(stderr, "listening on port {}", port);
 
-        auto accepted = accept_from(*listener);
-        if (!accepted) {
-            std::println(stderr, "{}", accepted.error());
-            return 1;
+        std::vector<Accepted> accepted;
+        accepted.reserve(streams);
+        for (std::size_t i = 0; i < streams; ++i) {
+            auto acc = accept_from(*listener);
+            if (!acc) {
+                std::println(stderr, "{}", acc.error());
+                return 1;
+            }
+            std::println(stderr, "accepted connection from {}", acc->peer);
+            accepted.push_back(std::move(*acc));
         }
-
-        std::println(stderr, "accepted connection from {}", accepted->peer);
 
         print_build_note();
         const auto *secs = std::get_if<std::chrono::seconds>(&*amount);
-        auto send_res = secs ? send_for(accepted->socket, *secs)
-                             : send_bytes(accepted->socket, std::get<std::uint64_t>(*amount));
-        if (!send_res) {
-            std::println(stderr, "{}", send_res.error());
+        std::vector<std::expected<SendResult, std::string>> results(streams);
+        {
+            std::vector<std::jthread> threads;
+            threads.reserve(streams);
+            for (std::size_t i = 0; i < streams; ++i) {
+                threads.emplace_back([i, &accepted, &results, secs, &amount] {
+                    results[i] =
+                        secs ? send_for(accepted[i].socket, *secs)
+                             : send_bytes(accepted[i].socket, std::get<std::uint64_t>(*amount));
+                });
+            }
+        }
+
+        bool has_error = false;
+        for (const auto &res: results) {
+            if (!res) {
+                std::println(stderr, "{}", res.error());
+                has_error = true;
+            }
+        }
+        if (has_error) {
             return 1;
         }
 
-        std::uint64_t sent = send_res->bytes;
-        std::chrono::duration<double> last_send = send_res->last_send;
-        std::chrono::duration<double> peer_done = send_res->peer_done;
+        std::uint64_t total_sent = 0;
+        std::chrono::steady_clock::duration max_last_send{};
+        std::chrono::steady_clock::duration max_peer_done{};
 
-        std::println("last send returned: {}", format_transfer(sent, last_send));
-        std::println("receiver finished:  {}", format_transfer(sent, peer_done));
+        for (const auto &res: results) {
+            total_sent += res->bytes;
+            max_last_send = std::max(max_last_send, res->last_send);
+            max_peer_done = std::max(max_peer_done, res->peer_done);
+        }
+
+        std::chrono::duration<double> last_send = max_last_send;
+        std::chrono::duration<double> peer_done = max_peer_done;
+
+        std::println("last send returned: {}", format_transfer(total_sent, last_send));
+        std::println("receiver finished:  {}", format_transfer(total_sent, peer_done));
         return 0;
     }
 
