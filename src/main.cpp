@@ -7,12 +7,43 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include <print>
 #include <string_view>
+#include <variant>
 
 namespace {
 constexpr std::string_view USAGE = "usage: speedtest recv HOST PORT\n"
-                                   "       speedtest send PORT BYTES";
+                                   "       speedtest send PORT BYTES\n"
+                                   "       speedtest send PORT SECONDSs    (e.g. 10s)";
+
+using SendAmount = std::variant<std::uint64_t, std::chrono::seconds>;
+
+std::optional<SendAmount> parse_amount(std::string_view text)
+{
+    if (text.ends_with('s')) {
+        text.remove_suffix(1);
+        std::uint64_t secs = 0;
+        auto [ptr, ec] = std::from_chars(text.data(), text.data() + text.size(), secs);
+        if (ec != std::errc{} || ptr != text.data() + text.size()) {
+            return std::nullopt;
+        }
+
+        if (secs < 1 || secs > 3600) {
+            return std::nullopt;
+        }
+
+        return std::chrono::seconds{static_cast<std::chrono::seconds::rep>(secs)};
+    }
+
+    std::uint64_t bytes = 0;
+    auto [ptr, ec] = std::from_chars(text.data(), text.data() + text.size(), bytes);
+    if (ec != std::errc{} || ptr != text.data() + text.size()) {
+        return std::nullopt;
+    }
+
+    return bytes;
+}
 
 void print_usage()
 {
@@ -86,11 +117,8 @@ int main(int argc, char *argv[])
 
         const std::string port = argv[2];
 
-        std::uint64_t bytes = 0;
-        const char *bytes_str = argv[3];
-        const char *bytes_end = bytes_str + std::strlen(bytes_str);
-        auto [ptr, ec] = std::from_chars(bytes_str, bytes_end, bytes);
-        if (ec != std::errc{} || ptr != bytes_end) {
+        auto amount = parse_amount(argv[3]);
+        if (!amount) {
             print_usage();
             return 2;
         }
@@ -112,7 +140,9 @@ int main(int argc, char *argv[])
         std::println(stderr, "accepted connection from {}", accepted->peer);
 
         print_build_note();
-        auto send_res = send_bytes(accepted->socket, bytes);
+        const auto *secs = std::get_if<std::chrono::seconds>(&*amount);
+        auto send_res = secs ? send_for(accepted->socket, *secs)
+                             : send_bytes(accepted->socket, std::get<std::uint64_t>(*amount));
         if (!send_res) {
             std::println(stderr, "{}", send_res.error());
             return 1;

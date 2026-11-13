@@ -6,6 +6,7 @@
 #include <expected>
 #include <span>
 #include <chrono>
+#include <string>
 
 struct SendResult {
     std::uint64_t bytes;
@@ -15,3 +16,4 @@ struct SendResult {
 
 std::expected<void, std::string> send_all(Socket &sock, std::span<const char> data);
 std::expected<SendResult, std::string> send_bytes(Socket &sock, std::uint64_t total);
+std::expected<SendResult, std::string> send_for(Socket &sock, std::chrono::seconds duration);
