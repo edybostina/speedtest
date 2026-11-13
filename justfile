@@ -1,5 +1,6 @@
 build_dir := "build"
 bench_dir := "build-bench"
+cxx := env_var_or_default("CXX", "g++-14")
 
 # list recipes
 default:
@@ -7,7 +8,7 @@ default:
 
 # generate the build system
 configure:
-    cmake -S . -B {{build_dir}}
+    cmake -S . -B {{build_dir}} -DCMAKE_CXX_COMPILER={{cxx}}
 
 # compile
 build: configure
@@ -15,7 +16,7 @@ build: configure
 
 # optimized build without sanitizers, for measuring
 build-bench:
-    cmake -S . -B {{bench_dir}} -DCMAKE_BUILD_TYPE=Release -DSPEEDTEST_SANITIZE=OFF
+    cmake -S . -B {{bench_dir}} -DCMAKE_CXX_COMPILER={{cxx}} -DCMAKE_BUILD_TYPE=Release -DSPEEDTEST_SANITIZE=OFF
     cmake --build {{bench_dir}} --parallel {{num_cpus()}}
 
 # build and run, passing any args through
