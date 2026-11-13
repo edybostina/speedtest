@@ -1,6 +1,7 @@
 #include "receiver.hpp"
 #include "sender.hpp"
 #include "socket.hpp"
+#include "stats.hpp"
 #include "units.hpp"
 
 #include <charconv>
@@ -10,6 +11,7 @@
 #include <print>
 #include <string_view>
 #include <variant>
+#include <vector>
 
 namespace {
 constexpr std::string_view USAGE = "usage: speedtest recv HOST PORT [OMITs]\n"
@@ -110,17 +112,21 @@ int main(int argc, char *argv[])
 
         std::uint64_t kept_bytes = 0;
         std::chrono::duration<double> kept_time{0};
+        std::vector<double> kept_rates;
 
-        auto print_interval = [&kept_bytes, &kept_time, &omit](const IntervalReport &report) {
+        auto print_interval = [&kept_bytes, &kept_time, &kept_rates,
+                               &omit](const IntervalReport &report) {
             double rate = megabits_per_second(report.bytes, report.end - report.start);
-            if (report.start < omit) {
-                std::println("{:7.3f}-{:7.3f} s {:12} bytes {:10.2f} Mbit/s (omitted)",
-                             report.start.count(), report.end.count(), report.bytes, rate);
-            } else {
-                std::println("{:7.3f}-{:7.3f} s {:12} bytes {:10.2f} Mbit/s", report.start.count(),
-                             report.end.count(), report.bytes, rate);
+            const std::string_view suffix = report.start < omit ? " (omitted)" : "";
+            std::println("{:7.3f}-{:7.3f} s {:12} bytes {:10.2f} Mbit/s{}", report.start.count(),
+                         report.end.count(), report.bytes, rate, suffix);
+
+            if (report.start >= omit) {
                 kept_bytes += report.bytes;
                 kept_time += report.end - report.start;
+                if (report.end - report.start >= std::chrono::duration<double>{0.5}) {
+                    kept_rates.push_back(rate);
+                }
             }
         };
 
@@ -137,11 +143,16 @@ int main(int argc, char *argv[])
         std::println("{}", format_transfer(bytes, seconds));
         if (omit.count() > 0) {
             if (kept_time.count() > 0) {
-                std::println("after omitting {} s:  {}", omit.count(),
+                std::println("after omitting {} s: {}", omit.count(),
                              format_transfer(kept_bytes, kept_time));
             } else {
                 std::println("after omitting {} s: nothing left to measure", omit.count());
             }
+        }
+
+        if (auto stats = summarize(kept_rates)) {
+            std::println("per-second: {} samples, min {:.2f}, median {:.2f}, max {:.2f} Mbit/s",
+                         stats->samples, stats->min, stats->median, stats->max);
         }
         return 0;
     }
