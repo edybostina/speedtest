@@ -17,11 +17,46 @@
 
 namespace {
 constexpr std::string_view USAGE =
-    "usage: speedtest recv HOST PORT [OMITs] [STREAMS]\n"
+    "usage: speedtest recv HOST PORT [OMITs] [STREAMS] [BUFk|BUFm]\n"
     "       speedtest send PORT BYTES [STREAMS]      (BYTES per stream)\n"
     "       speedtest send PORT SECONDSs [STREAMS]   (e.g. 10s)";
 
 using SendAmount = std::variant<std::uint64_t, std::chrono::seconds>;
+
+std::optional<int> parse_size(std::string_view text)
+{
+    if (text.empty()) {
+        return std::nullopt;
+    }
+
+    char suffix = text.back();
+    if (suffix != 'k' && suffix != 'm') {
+        return std::nullopt;
+    }
+
+    std::uint64_t multiplier = (suffix == 'k') ? 1024ULL : (1024ULL * 1024ULL);
+    text.remove_suffix(1);
+
+    std::uint64_t num = 0;
+    auto [ptr, ec] = std::from_chars(text.data(), text.data() + text.size(), num);
+    if (ec != std::errc{} || ptr != text.data() + text.size()) {
+        return std::nullopt;
+    }
+
+    constexpr std::uint64_t min_bytes = 4ULL * 1024ULL;
+    constexpr std::uint64_t max_bytes = 8ULL * 1024ULL * 1024ULL;
+
+    if (num > max_bytes / multiplier) {
+        return std::nullopt;
+    }
+
+    std::uint64_t total = num * multiplier;
+    if (total < min_bytes || total > max_bytes) {
+        return std::nullopt;
+    }
+
+    return static_cast<int>(total);
+}
 
 std::optional<std::size_t> parse_streams(std::string_view text)
 {
@@ -98,7 +133,7 @@ int main(int argc, char *argv[])
     const std::string_view mode = argv[1];
 
     if (mode == "recv") {
-        if (argc < 4 || argc > 6) {
+        if (argc < 4 || argc > 7) {
             print_usage();
             return 2;
         }
@@ -110,6 +145,8 @@ int main(int argc, char *argv[])
         bool has_omit = false;
         std::size_t streams = 1;
         bool has_streams = false;
+        int rcvbuf = 0;
+        bool has_rcvbuf = false;
 
         for (int i = 4; i < argc; ++i) {
             std::string_view arg = argv[i];
@@ -125,6 +162,18 @@ int main(int argc, char *argv[])
                 }
                 omit = *parsed_omit;
                 has_omit = true;
+            } else if (arg.ends_with('k') || arg.ends_with('m')) {
+                if (has_rcvbuf) {
+                    print_usage();
+                    return 2;
+                }
+                auto parsed_buf = parse_size(arg);
+                if (!parsed_buf) {
+                    print_usage();
+                    return 2;
+                }
+                rcvbuf = *parsed_buf;
+                has_rcvbuf = true;
             } else {
                 if (has_streams) {
                     print_usage();
@@ -142,19 +191,40 @@ int main(int argc, char *argv[])
 
         std::vector<Socket> sockets;
         sockets.reserve(streams);
+        std::chrono::steady_clock::duration min_handshake =
+            std::chrono::steady_clock::duration::max();
+
         for (std::size_t i = 0; i < streams; ++i) {
-            auto sock = connect_to(host, port);
-            if (!sock) {
-                std::println(stderr, "{}", sock.error());
+            auto conn = connect_to(host, port, rcvbuf);
+            if (!conn) {
+                std::println(stderr, "{}", conn.error());
                 return 1;
             }
 
+            min_handshake = std::min(min_handshake, conn->handshake);
+            std::chrono::duration<double, std::milli> hs_ms = conn->handshake;
+
             if (host.find(':') != std::string::npos && !host.starts_with('[')) {
-                std::println(stderr, "connected to [{}]:{}", host, port);
+                std::println(stderr, "connected to [{}]:{} (handshake {:.1f} ms)", host, port,
+                             hs_ms.count());
             } else {
-                std::println(stderr, "connected to {}:{}", host, port);
+                std::println(stderr, "connected to {}:{} (handshake {:.1f} ms)", host, port,
+                             hs_ms.count());
             }
-            sockets.push_back(std::move(*sock));
+            sockets.push_back(std::move(conn->socket));
+        }
+
+        auto initial_buf = receive_buffer_size(sockets.front());
+        if (!initial_buf) {
+            std::println(stderr, "{}", initial_buf.error());
+            return 1;
+        }
+
+        if (has_rcvbuf) {
+            std::println(stderr, "receive buffer: requested {} bytes, kernel reports {} bytes",
+                         rcvbuf, *initial_buf);
+        } else {
+            std::println(stderr, "receive buffer: {} bytes (kernel default)", *initial_buf);
         }
 
         std::uint64_t kept_bytes = 0;
@@ -200,6 +270,22 @@ int main(int argc, char *argv[])
         if (auto stats = summarize(kept_rates)) {
             std::println("per-second: {} samples, min {:.2f}, median {:.2f}, max {:.2f} Mbit/s",
                          stats->samples, stats->min, stats->median, stats->max);
+        }
+
+        auto end_buf = receive_buffer_size(sockets.front());
+        if (!end_buf) {
+            std::println(stderr, "{}", end_buf.error());
+            return 1;
+        }
+
+        std::println("receive buffer at end: {} bytes", *end_buf);
+
+        if (has_rcvbuf) {
+            std::chrono::duration<double, std::milli> rtt_ms = min_handshake;
+            std::chrono::duration<double> rtt_sec = min_handshake;
+            double limit = megabits_per_second(static_cast<std::uint64_t>(rcvbuf), rtt_sec);
+            std::println("window limit: {} bytes / {:.1f} ms = {:.2f} Mbit/s per stream", rcvbuf,
+                         rtt_ms.count(), limit);
         }
         return 0;
     }

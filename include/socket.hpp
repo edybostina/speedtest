@@ -2,6 +2,7 @@
 
 #include <expected>
 #include <string>
+#include <chrono>
 #include <unistd.h>
 
 class Socket
@@ -59,6 +60,13 @@ struct Accepted {
     std::string peer;
 };
 
-std::expected<Socket, std::string> connect_to(const std::string &host, const std::string &port);
+struct Connected {
+    Socket socket;
+    std::chrono::steady_clock::duration handshake;
+};
+
+std::expected<Connected, std::string> connect_to(const std::string &host, const std::string &port,
+                                                 int rcvbuf = 0);
 std::expected<Socket, std::string> listen_on(const std::string &port);
 std::expected<Accepted, std::string> accept_from(Socket &listener);
+std::expected<int, std::string> receive_buffer_size(const Socket &sock);

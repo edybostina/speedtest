@@ -1,6 +1,8 @@
 #include "socket.hpp"
 
 #include <cerrno>
+#include <chrono>
+#include <cstddef>
 #include <format>
 #include <memory>
 #include <netdb.h>
@@ -9,7 +11,8 @@
 #include <system_error>
 #include <utility>
 
-std::expected<Socket, std::string> connect_to(const std::string &host, const std::string &port)
+std::expected<Connected, std::string> connect_to(const std::string &host, const std::string &port,
+                                                 int rcvbuf)
 {
     struct addrinfo hints{};
     hints.ai_family = AF_UNSPEC;
@@ -42,8 +45,19 @@ std::expected<Socket, std::string> connect_to(const std::string &host, const std
 
         Socket sock(fd);
 
+        if (rcvbuf > 0) {
+            int rc = ::setsockopt(sock.get(), SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+            if (rc < 0) {
+                int err = errno;
+                return std::unexpected(std::format("failed to set receive buffer to {} bytes: {}",
+                                                   rcvbuf, std::system_category().message(err)));
+            }
+        }
+
+        auto t0 = std::chrono::steady_clock::now();
         if (::connect(sock.get(), rp->ai_addr, rp->ai_addrlen) == 0) {
-            return sock;
+            auto t1 = std::chrono::steady_clock::now();
+            return Connected{std::move(sock), t1 - t0};
         }
 
         int err = errno;
@@ -184,4 +198,16 @@ std::expected<Accepted, std::string> accept_from(Socket &listener)
         .socket = std::move(client_sock),
         .peer = std::move(peer),
     };
+}
+
+std::expected<int, std::string> receive_buffer_size(const Socket &sock)
+{
+    int size = 0;
+    socklen_t len = sizeof(size);
+    if (::getsockopt(sock.get(), SOL_SOCKET, SO_RCVBUF, &size, &len) < 0) {
+        int err = errno;
+        return std::unexpected(
+            std::format("getsockopt(SO_RCVBUF) failed: {}", std::system_category().message(err)));
+    }
+    return size;
 }
