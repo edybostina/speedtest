@@ -1,4 +1,5 @@
 #include "receiver.hpp"
+#include "report.hpp"
 #include "sender.hpp"
 #include "socket.hpp"
 #include "stats.hpp"
@@ -254,6 +255,18 @@ int main(int argc, char *argv[])
             return 1;
         }
 
+        for (std::size_t i = 0; i < sockets.size(); ++i) {
+            auto rep_res = send_report(
+                sockets[i],
+                StreamReport{.bytes = result->stream_bytes[i],
+                             .elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                                 result->elapsed)});
+            if (!rep_res) {
+                std::println(stderr, "{}", rep_res.error());
+                return 1;
+            }
+        }
+
         std::uint64_t bytes = result->bytes;
         std::chrono::duration<double> seconds = result->elapsed;
 
@@ -363,18 +376,24 @@ int main(int argc, char *argv[])
         std::uint64_t total_sent = 0;
         std::chrono::steady_clock::duration max_last_send{};
         std::chrono::steady_clock::duration max_peer_done{};
+        std::uint64_t total_reported = 0;
+        std::chrono::microseconds max_reported_elapsed{};
 
         for (const auto &res: results) {
             total_sent += res->bytes;
             max_last_send = std::max(max_last_send, res->last_send);
             max_peer_done = std::max(max_peer_done, res->peer_done);
+            total_reported += res->report.bytes;
+            max_reported_elapsed = std::max(max_reported_elapsed, res->report.elapsed);
         }
 
         std::chrono::duration<double> last_send = max_last_send;
         std::chrono::duration<double> peer_done = max_peer_done;
+        std::chrono::duration<double> reported_elapsed = max_reported_elapsed;
 
         std::println("last send returned: {}", format_transfer(total_sent, last_send));
         std::println("receiver finished:  {}", format_transfer(total_sent, peer_done));
+        std::println("receiver counted:   {}", format_transfer(total_reported, reported_elapsed));
         return 0;
     }
 

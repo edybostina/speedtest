@@ -9,10 +9,12 @@
 #include <functional>
 #include <span>
 #include <string>
+#include <vector>
 
 struct ReceiveResult {
     std::uint64_t bytes;
     std::chrono::steady_clock::duration elapsed;
+    std::vector<std::uint64_t> stream_bytes;
 };
 
 struct IntervalReport {
@@ -27,3 +29,5 @@ receive(std::span<Socket> sockets,
 
 std::expected<ReceiveResult, std::string>
 receive(Socket &socket, const std::function<void(const IntervalReport &)> &on_interval = {});
+
+std::expected<void, std::string> recv_all(Socket &sock, std::span<char> data);

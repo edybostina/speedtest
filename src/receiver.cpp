@@ -44,6 +44,7 @@ receive(std::span<Socket> sockets, const std::function<void(const IntervalReport
         fds.push_back(pollfd{.fd = sock.get(), .events = POLLIN, .revents = 0});
     }
     std::size_t open = sockets.size();
+    std::vector<std::uint64_t> stream_bytes(sockets.size(), 0);
 
     while (open > 0) {
         auto wait = next_report - std::chrono::steady_clock::now();
@@ -69,7 +70,8 @@ receive(std::span<Socket> sockets, const std::function<void(const IntervalReport
             continue;
         }
 
-        for (auto &pfd: fds) {
+        for (std::size_t i = 0; i < fds.size(); ++i) {
+            auto &pfd = fds[i];
             if (pfd.revents == 0) {
                 continue;
             }
@@ -87,8 +89,10 @@ receive(std::span<Socket> sockets, const std::function<void(const IntervalReport
                 return std::unexpected(std::format("recv failed after {} bytes: {}", total,
                                                    std::system_category().message(err)));
             } else {
-                interval_bytes += static_cast<std::uint64_t>(bytes_read);
-                total += static_cast<std::uint64_t>(bytes_read);
+                auto count = static_cast<std::uint64_t>(bytes_read);
+                interval_bytes += count;
+                total += count;
+                stream_bytes[i] += count;
             }
         }
 
@@ -102,11 +106,34 @@ receive(std::span<Socket> sockets, const std::function<void(const IntervalReport
     if (interval_bytes > 0 && on_interval) {
         on_interval({interval_start - start, now - start, interval_bytes});
     }
-    return ReceiveResult{.bytes = total, .elapsed = elapsed};
+    return ReceiveResult{
+        .bytes = total, .elapsed = elapsed, .stream_bytes = std::move(stream_bytes)};
 }
 
 std::expected<ReceiveResult, std::string>
 receive(Socket &socket, const std::function<void(const IntervalReport &)> &on_interval)
 {
     return receive(std::span<Socket>{&socket, 1}, on_interval);
+}
+
+std::expected<void, std::string> recv_all(Socket &sock, std::span<char> data)
+{
+    std::size_t want = data.size();
+    while (!data.empty()) {
+        ssize_t rc = ::recv(sock.get(), data.data(), data.size(), 0);
+        if (rc > 0) {
+            data = data.subspan(static_cast<std::size_t>(rc));
+        } else if (rc == 0) {
+            std::size_t got = want - data.size();
+            return std::unexpected(std::format("peer closed after {} of {} bytes", got, want));
+        } else {
+            int err = errno;
+            if (err == EINTR) {
+                continue;
+            }
+            return std::unexpected(
+                std::format("recv failed: {}", std::system_category().message(err)));
+        }
+    }
+    return {};
 }

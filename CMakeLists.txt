@@ -40,7 +40,7 @@ endif()
 
 find_package(Threads REQUIRED)
 
-add_executable(speedtest src/main.cpp src/socket.cpp src/receiver.cpp src/sender.cpp src/units.cpp src/stats.cpp)
+add_executable(speedtest src/main.cpp src/socket.cpp src/receiver.cpp src/sender.cpp src/units.cpp src/stats.cpp src/report.cpp)
 
 target_include_directories(speedtest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(speedtest PRIVATE Threads::Threads)

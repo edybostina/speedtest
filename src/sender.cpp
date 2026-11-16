@@ -1,5 +1,6 @@
 #include "sender.hpp"
 #include "receiver.hpp"
+#include "report.hpp"
 #include "speedtest.hpp"
 
 #include <chrono>
@@ -61,13 +62,18 @@ std::expected<SendResult, std::string> finish_send(Socket &sock, std::uint64_t s
             std::format("shutdown failed: {}", std::system_category().message(err)));
     }
 
-    auto rec = receive(sock);
-    if (!rec) {
-        return std::unexpected(std::format("receive failed: {}", rec.error()));
+    auto report = read_report(sock);
+    if (!report) {
+        return std::unexpected(std::format("receiver report failed: {}", report.error()));
+    }
+
+    if (report->bytes != sent) {
+        return std::unexpected(std::format("receiver counted {} of {} bytes", report->bytes, sent));
     }
 
     auto peer_done = std::chrono::steady_clock::now() - start;
-    return SendResult{.bytes = sent, .last_send = last_send, .peer_done = peer_done};
+    return SendResult{
+        .bytes = sent, .last_send = last_send, .peer_done = peer_done, .report = *report};
 }
 } // namespace
 
