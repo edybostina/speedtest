@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdint>
+#include <expected>
 #include <optional>
 #include <print>
 #include <span>
@@ -18,7 +19,8 @@
 namespace {
 constexpr std::string_view USAGE =
     "usage: speedtest serve PORT\n"
-    "       speedtest down HOST PORT SECONDSs [OMITs] [STREAMS] [BUFk|BUFm]";
+    "       speedtest down HOST PORT SECONDSs [OMITs] [STREAMS] [BUFk|BUFm]\n"
+    "       speedtest up HOST PORT SECONDSs [STREAMS]";
 
 std::optional<int> parse_size(std::string_view text)
 {
@@ -144,6 +146,47 @@ std::optional<RecvOptions> parse_recv_options(std::span<char *const> args)
     return RecvOptions{.omit = omit, .streams = streams, .rcvbuf = rcvbuf};
 }
 
+struct Connections {
+    std::vector<Socket> sockets;
+    std::chrono::steady_clock::duration min_handshake;
+};
+
+std::expected<Connections, std::string> connect_streams(const std::string &host,
+                                                        const std::string &port,
+                                                        const TestRequest &request, int rcvbuf)
+{
+    std::vector<Socket> sockets;
+    sockets.reserve(request.streams);
+    std::chrono::steady_clock::duration min_handshake = std::chrono::steady_clock::duration::max();
+
+    for (std::size_t i = 0; i < request.streams; ++i) {
+        auto conn = connect_to(host, port, rcvbuf);
+        if (!conn) {
+            return std::unexpected(conn.error());
+        }
+
+        min_handshake = std::min(min_handshake, conn->handshake);
+        std::chrono::duration<double, std::milli> hs_ms = conn->handshake;
+
+        if (host.find(':') != std::string::npos && !host.starts_with('[')) {
+            std::println(stderr, "connected to [{}]:{} (handshake {:.1f} ms)", host, port,
+                         hs_ms.count());
+        } else {
+            std::println(stderr, "connected to {}:{} (handshake {:.1f} ms)", host, port,
+                         hs_ms.count());
+        }
+
+        auto req_res = send_request(conn->socket, request);
+        if (!req_res) {
+            return std::unexpected(req_res.error());
+        }
+
+        sockets.push_back(std::move(conn->socket));
+    }
+
+    return Connections{.sockets = std::move(sockets), .min_handshake = min_handshake};
+}
+
 void print_usage()
 {
     std::println(stderr, "{}", USAGE);
@@ -188,11 +231,6 @@ int main(int argc, char *argv[])
                 continue;
             }
 
-            if (first_req->direction == Direction::upload) {
-                std::println(stderr, "{}: upload not supported yet", first_acc->peer);
-                continue;
-            }
-
             std::vector<Socket> sockets;
             sockets.reserve(first_req->streams);
             sockets.push_back(std::move(first_acc->socket));
@@ -226,10 +264,17 @@ int main(int argc, char *argv[])
                 continue;
             }
 
-            std::println("test from {}: download, {} streams, {} s", first_acc->peer,
+            std::string direction =
+                first_req->direction == Direction::download ? "download" : "upload";
+            std::println("test from {}: {}, {} streams, {} s", first_acc->peer, direction,
                          +first_req->streams, first_req->duration.count());
 
-            run_send(sockets, first_req->duration);
+            if (first_req->direction == Direction::download) {
+                run_send(sockets, first_req->duration);
+            } else {
+                run_receive(sockets, std::chrono::seconds{0});
+            }
+
             std::fflush(stdout);
         }
     }
@@ -255,42 +300,17 @@ int main(int argc, char *argv[])
             return 2;
         }
 
-        std::vector<Socket> sockets;
-        sockets.reserve(opts->streams);
-        std::chrono::steady_clock::duration min_handshake =
-            std::chrono::steady_clock::duration::max();
+        TestRequest request{.direction = Direction::download,
+                            .streams = static_cast<std::uint8_t>(opts->streams),
+                            .duration = *duration};
 
-        for (std::size_t i = 0; i < opts->streams; ++i) {
-            auto conn = connect_to(host, port, opts->rcvbuf);
-            if (!conn) {
-                std::println(stderr, "{}", conn.error());
-                return 1;
-            }
-
-            min_handshake = std::min(min_handshake, conn->handshake);
-            std::chrono::duration<double, std::milli> hs_ms = conn->handshake;
-
-            if (host.find(':') != std::string::npos && !host.starts_with('[')) {
-                std::println(stderr, "connected to [{}]:{} (handshake {:.1f} ms)", host, port,
-                             hs_ms.count());
-            } else {
-                std::println(stderr, "connected to {}:{} (handshake {:.1f} ms)", host, port,
-                             hs_ms.count());
-            }
-
-            auto req_res = send_request(
-                conn->socket, TestRequest{.direction = Direction::download,
-                                          .streams = static_cast<std::uint8_t>(opts->streams),
-                                          .duration = *duration});
-            if (!req_res) {
-                std::println(stderr, "{}", req_res.error());
-                return 1;
-            }
-
-            sockets.push_back(std::move(conn->socket));
+        auto conn = connect_streams(host, port, request, opts->rcvbuf);
+        if (!conn) {
+            std::println(stderr, "{}", conn.error());
+            return 1;
         }
 
-        auto initial_buf = receive_buffer_size(sockets.front());
+        auto initial_buf = receive_buffer_size(conn->sockets.front());
         if (!initial_buf) {
             std::println(stderr, "{}", initial_buf.error());
             return 1;
@@ -303,11 +323,11 @@ int main(int argc, char *argv[])
             std::println(stderr, "receive buffer: {} bytes (kernel default)", *initial_buf);
         }
 
-        if (int rc = run_receive(sockets, opts->omit); rc != 0) {
+        if (int rc = run_receive(conn->sockets, opts->omit); rc != 0) {
             return rc;
         }
 
-        auto end_buf = receive_buffer_size(sockets.front());
+        auto end_buf = receive_buffer_size(conn->sockets.front());
         if (!end_buf) {
             std::println(stderr, "{}", end_buf.error());
             return 1;
@@ -316,13 +336,51 @@ int main(int argc, char *argv[])
         std::println("receive buffer at end: {} bytes", *end_buf);
 
         if (opts->rcvbuf > 0) {
-            std::chrono::duration<double, std::milli> rtt_ms = min_handshake;
-            std::chrono::duration<double> rtt_sec = min_handshake;
+            std::chrono::duration<double, std::milli> rtt_ms = conn->min_handshake;
+            std::chrono::duration<double> rtt_sec = conn->min_handshake;
             double limit = megabits_per_second(static_cast<std::uint64_t>(opts->rcvbuf), rtt_sec);
             std::println("window limit: {} bytes / {:.1f} ms = {:.2f} Mbit/s per stream",
                          opts->rcvbuf, rtt_ms.count(), limit);
         }
         return 0;
+    }
+
+    if (mode == "up") {
+        if (argc != 5 && argc != 6) {
+            print_usage();
+            return 2;
+        }
+
+        const std::string host = argv[2];
+        const std::string port = argv[3];
+
+        auto duration = parse_seconds(argv[4], 1, 3600);
+        if (!duration) {
+            print_usage();
+            return 2;
+        }
+
+        std::size_t streams = 1;
+        if (argc == 6) {
+            auto parsed_streams = parse_streams(argv[5]);
+            if (!parsed_streams) {
+                print_usage();
+                return 2;
+            }
+            streams = *parsed_streams;
+        }
+
+        TestRequest request{.direction = Direction::upload,
+                            .streams = static_cast<std::uint8_t>(streams),
+                            .duration = *duration};
+
+        auto conn = connect_streams(host, port, request, 0);
+        if (!conn) {
+            std::println(stderr, "{}", conn.error());
+            return 1;
+        }
+
+        return run_send(conn->sockets, *duration);
     }
 
     print_usage();
