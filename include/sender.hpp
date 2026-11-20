@@ -3,6 +3,7 @@
 #include "report.hpp"
 #include "socket.hpp"
 #include "speedtest.hpp"
+
 #include <chrono>
 #include <cstdint>
 #include <expected>
@@ -17,5 +18,4 @@ struct SendResult {
 };
 
 std::expected<void, std::string> send_all(Socket &sock, std::span<const char> data);
-std::expected<SendResult, std::string> send_bytes(Socket &sock, std::uint64_t total);
 std::expected<SendResult, std::string> send_for(Socket &sock, std::chrono::seconds duration);

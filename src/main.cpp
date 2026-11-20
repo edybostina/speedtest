@@ -1,28 +1,24 @@
-#include "receiver.hpp"
-#include "report.hpp"
-#include "sender.hpp"
+#include "request.hpp"
+#include "session.hpp"
 #include "socket.hpp"
-#include "stats.hpp"
 #include "units.hpp"
 
 #include <algorithm>
 #include <charconv>
 #include <chrono>
+#include <cstdio>
 #include <cstdint>
 #include <optional>
 #include <print>
+#include <span>
+#include <string>
 #include <string_view>
-#include <thread>
-#include <variant>
 #include <vector>
 
 namespace {
 constexpr std::string_view USAGE =
-    "usage: speedtest recv HOST PORT [OMITs] [STREAMS] [BUFk|BUFm]\n"
-    "       speedtest send PORT BYTES [STREAMS]      (BYTES per stream)\n"
-    "       speedtest send PORT SECONDSs [STREAMS]   (e.g. 10s)";
-
-using SendAmount = std::variant<std::uint64_t, std::chrono::seconds>;
+    "usage: speedtest serve PORT\n"
+    "       speedtest down HOST PORT SECONDSs [OMITs] [STREAMS] [BUFk|BUFm]";
 
 std::optional<int> parse_size(std::string_view text)
 {
@@ -95,32 +91,62 @@ std::optional<std::chrono::seconds> parse_seconds(std::string_view text, std::ui
     return std::chrono::seconds{static_cast<std::chrono::seconds::rep>(secs)};
 }
 
-std::optional<SendAmount> parse_amount(std::string_view text)
+struct RecvOptions {
+    std::chrono::seconds omit{0};
+    std::size_t streams = 1;
+    int rcvbuf = 0;
+};
+
+std::optional<RecvOptions> parse_recv_options(std::span<char *const> args)
 {
-    if (text.ends_with('s')) {
-        return parse_seconds(text, 1, 3600);
+    std::chrono::seconds omit{0};
+    bool has_omit = false;
+    std::size_t streams = 1;
+    bool has_streams = false;
+    int rcvbuf = 0;
+    bool has_rcvbuf = false;
+
+    for (const char *arg_str: args) {
+        std::string_view arg = arg_str;
+        if (arg.ends_with('s')) {
+            if (has_omit) {
+                return std::nullopt;
+            }
+            auto parsed_omit = parse_seconds(arg, 0, 60);
+            if (!parsed_omit) {
+                return std::nullopt;
+            }
+            omit = *parsed_omit;
+            has_omit = true;
+        } else if (arg.ends_with('k') || arg.ends_with('m')) {
+            if (has_rcvbuf) {
+                return std::nullopt;
+            }
+            auto parsed_buf = parse_size(arg);
+            if (!parsed_buf) {
+                return std::nullopt;
+            }
+            rcvbuf = *parsed_buf;
+            has_rcvbuf = true;
+        } else {
+            if (has_streams) {
+                return std::nullopt;
+            }
+            auto parsed_streams = parse_streams(arg);
+            if (!parsed_streams) {
+                return std::nullopt;
+            }
+            streams = *parsed_streams;
+            has_streams = true;
+        }
     }
 
-    std::uint64_t bytes = 0;
-    auto [ptr, ec] = std::from_chars(text.data(), text.data() + text.size(), bytes);
-    if (ec != std::errc{} || ptr != text.data() + text.size()) {
-        return std::nullopt;
-    }
-
-    return bytes;
+    return RecvOptions{.omit = omit, .streams = streams, .rcvbuf = rcvbuf};
 }
 
 void print_usage()
 {
     std::println(stderr, "{}", USAGE);
-}
-
-void print_build_note()
-{
-#ifdef SPEEDTEST_SANITIZED
-    std::println(
-        stderr, "note: ASan/UBSan build, rates are not representative (measure with build-bench/)");
-#endif
 }
 } // namespace
 
@@ -133,8 +159,83 @@ int main(int argc, char *argv[])
 
     const std::string_view mode = argv[1];
 
-    if (mode == "recv") {
-        if (argc < 4 || argc > 7) {
+    if (mode == "serve") {
+        if (argc != 3) {
+            print_usage();
+            return 2;
+        }
+
+        const std::string port = argv[2];
+
+        auto listener = listen_on(port);
+        if (!listener) {
+            std::println(stderr, "{}", listener.error());
+            return 1;
+        }
+
+        std::println(stderr, "listening on port {}", port);
+
+        while (true) {
+            auto first_acc = accept_from(*listener);
+            if (!first_acc) {
+                std::println(stderr, "{}", first_acc.error());
+                continue;
+            }
+
+            auto first_req = read_request(first_acc->socket);
+            if (!first_req) {
+                std::println(stderr, "{}: {}", first_acc->peer, first_req.error());
+                continue;
+            }
+
+            if (first_req->direction == Direction::upload) {
+                std::println(stderr, "{}: upload not supported yet", first_acc->peer);
+                continue;
+            }
+
+            std::vector<Socket> sockets;
+            sockets.reserve(first_req->streams);
+            sockets.push_back(std::move(first_acc->socket));
+
+            bool failed = false;
+            for (std::size_t i = 1; i < first_req->streams; ++i) {
+                auto acc = accept_from(*listener);
+                if (!acc) {
+                    std::println(stderr, "{}", acc.error());
+                    failed = true;
+                    break;
+                }
+
+                auto req = read_request(acc->socket);
+                if (!req) {
+                    std::println(stderr, "{}: {}", acc->peer, req.error());
+                    failed = true;
+                    break;
+                }
+
+                if (*req != *first_req) {
+                    std::println(stderr, "{}: request does not match the first", acc->peer);
+                    failed = true;
+                    break;
+                }
+
+                sockets.push_back(std::move(acc->socket));
+            }
+
+            if (failed) {
+                continue;
+            }
+
+            std::println("test from {}: download, {} streams, {} s", first_acc->peer,
+                         +first_req->streams, first_req->duration.count());
+
+            run_send(sockets, first_req->duration);
+            std::fflush(stdout);
+        }
+    }
+
+    if (mode == "down") {
+        if (argc < 5 || argc > 8) {
             print_usage();
             return 2;
         }
@@ -142,61 +243,25 @@ int main(int argc, char *argv[])
         const std::string host = argv[2];
         const std::string port = argv[3];
 
-        std::chrono::seconds omit{0};
-        bool has_omit = false;
-        std::size_t streams = 1;
-        bool has_streams = false;
-        int rcvbuf = 0;
-        bool has_rcvbuf = false;
+        auto duration = parse_seconds(argv[4], 1, 3600);
+        if (!duration) {
+            print_usage();
+            return 2;
+        }
 
-        for (int i = 4; i < argc; ++i) {
-            std::string_view arg = argv[i];
-            if (arg.ends_with('s')) {
-                if (has_omit) {
-                    print_usage();
-                    return 2;
-                }
-                auto parsed_omit = parse_seconds(arg, 0, 60);
-                if (!parsed_omit) {
-                    print_usage();
-                    return 2;
-                }
-                omit = *parsed_omit;
-                has_omit = true;
-            } else if (arg.ends_with('k') || arg.ends_with('m')) {
-                if (has_rcvbuf) {
-                    print_usage();
-                    return 2;
-                }
-                auto parsed_buf = parse_size(arg);
-                if (!parsed_buf) {
-                    print_usage();
-                    return 2;
-                }
-                rcvbuf = *parsed_buf;
-                has_rcvbuf = true;
-            } else {
-                if (has_streams) {
-                    print_usage();
-                    return 2;
-                }
-                auto parsed_streams = parse_streams(arg);
-                if (!parsed_streams) {
-                    print_usage();
-                    return 2;
-                }
-                streams = *parsed_streams;
-                has_streams = true;
-            }
+        auto opts = parse_recv_options({argv + 5, argv + argc});
+        if (!opts) {
+            print_usage();
+            return 2;
         }
 
         std::vector<Socket> sockets;
-        sockets.reserve(streams);
+        sockets.reserve(opts->streams);
         std::chrono::steady_clock::duration min_handshake =
             std::chrono::steady_clock::duration::max();
 
-        for (std::size_t i = 0; i < streams; ++i) {
-            auto conn = connect_to(host, port, rcvbuf);
+        for (std::size_t i = 0; i < opts->streams; ++i) {
+            auto conn = connect_to(host, port, opts->rcvbuf);
             if (!conn) {
                 std::println(stderr, "{}", conn.error());
                 return 1;
@@ -212,6 +277,16 @@ int main(int argc, char *argv[])
                 std::println(stderr, "connected to {}:{} (handshake {:.1f} ms)", host, port,
                              hs_ms.count());
             }
+
+            auto req_res = send_request(
+                conn->socket, TestRequest{.direction = Direction::download,
+                                          .streams = static_cast<std::uint8_t>(opts->streams),
+                                          .duration = *duration});
+            if (!req_res) {
+                std::println(stderr, "{}", req_res.error());
+                return 1;
+            }
+
             sockets.push_back(std::move(conn->socket));
         }
 
@@ -221,68 +296,15 @@ int main(int argc, char *argv[])
             return 1;
         }
 
-        if (has_rcvbuf) {
+        if (opts->rcvbuf > 0) {
             std::println(stderr, "receive buffer: requested {} bytes, kernel reports {} bytes",
-                         rcvbuf, *initial_buf);
+                         opts->rcvbuf, *initial_buf);
         } else {
             std::println(stderr, "receive buffer: {} bytes (kernel default)", *initial_buf);
         }
 
-        std::uint64_t kept_bytes = 0;
-        std::chrono::duration<double> kept_time{0};
-        std::vector<double> kept_rates;
-
-        auto print_interval = [&kept_bytes, &kept_time, &kept_rates,
-                               &omit](const IntervalReport &report) {
-            double rate = megabits_per_second(report.bytes, report.end - report.start);
-            const std::string_view suffix = report.start < omit ? " (omitted)" : "";
-            std::println("{:7.3f}-{:7.3f} s {:12} bytes {:10.2f} Mbit/s{}", report.start.count(),
-                         report.end.count(), report.bytes, rate, suffix);
-
-            if (report.start >= omit) {
-                kept_bytes += report.bytes;
-                kept_time += report.end - report.start;
-                if (report.end - report.start >= std::chrono::duration<double>{0.5}) {
-                    kept_rates.push_back(rate);
-                }
-            }
-        };
-
-        print_build_note();
-        auto result = receive(sockets, print_interval);
-        if (!result) {
-            std::println(stderr, "{}", result.error());
-            return 1;
-        }
-
-        for (std::size_t i = 0; i < sockets.size(); ++i) {
-            auto rep_res = send_report(
-                sockets[i],
-                StreamReport{.bytes = result->stream_bytes[i],
-                             .elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
-                                 result->elapsed)});
-            if (!rep_res) {
-                std::println(stderr, "{}", rep_res.error());
-                return 1;
-            }
-        }
-
-        std::uint64_t bytes = result->bytes;
-        std::chrono::duration<double> seconds = result->elapsed;
-
-        std::println("{}", format_transfer(bytes, seconds));
-        if (omit.count() > 0) {
-            if (kept_time.count() > 0) {
-                std::println("after omitting {} s: {}", omit.count(),
-                             format_transfer(kept_bytes, kept_time));
-            } else {
-                std::println("after omitting {} s: nothing left to measure", omit.count());
-            }
-        }
-
-        if (auto stats = summarize(kept_rates)) {
-            std::println("per-second: {} samples, min {:.2f}, median {:.2f}, max {:.2f} Mbit/s",
-                         stats->samples, stats->min, stats->median, stats->max);
+        if (int rc = run_receive(sockets, opts->omit); rc != 0) {
+            return rc;
         }
 
         auto end_buf = receive_buffer_size(sockets.front());
@@ -293,107 +315,13 @@ int main(int argc, char *argv[])
 
         std::println("receive buffer at end: {} bytes", *end_buf);
 
-        if (has_rcvbuf) {
+        if (opts->rcvbuf > 0) {
             std::chrono::duration<double, std::milli> rtt_ms = min_handshake;
             std::chrono::duration<double> rtt_sec = min_handshake;
-            double limit = megabits_per_second(static_cast<std::uint64_t>(rcvbuf), rtt_sec);
-            std::println("window limit: {} bytes / {:.1f} ms = {:.2f} Mbit/s per stream", rcvbuf,
-                         rtt_ms.count(), limit);
+            double limit = megabits_per_second(static_cast<std::uint64_t>(opts->rcvbuf), rtt_sec);
+            std::println("window limit: {} bytes / {:.1f} ms = {:.2f} Mbit/s per stream",
+                         opts->rcvbuf, rtt_ms.count(), limit);
         }
-        return 0;
-    }
-
-    if (mode == "send") {
-        if (argc != 4 && argc != 5) {
-            print_usage();
-            return 2;
-        }
-
-        const std::string port = argv[2];
-
-        auto amount = parse_amount(argv[3]);
-        if (!amount) {
-            print_usage();
-            return 2;
-        }
-
-        std::size_t streams = 1;
-        if (argc == 5) {
-            auto parsed_streams = parse_streams(argv[4]);
-            if (!parsed_streams) {
-                print_usage();
-                return 2;
-            }
-            streams = *parsed_streams;
-        }
-
-        auto listener = listen_on(port);
-        if (!listener) {
-            std::println(stderr, "{}", listener.error());
-            return 1;
-        }
-
-        std::println(stderr, "listening on port {}", port);
-
-        std::vector<Accepted> accepted;
-        accepted.reserve(streams);
-        for (std::size_t i = 0; i < streams; ++i) {
-            auto acc = accept_from(*listener);
-            if (!acc) {
-                std::println(stderr, "{}", acc.error());
-                return 1;
-            }
-            std::println(stderr, "accepted connection from {}", acc->peer);
-            accepted.push_back(std::move(*acc));
-        }
-
-        print_build_note();
-        const auto *secs = std::get_if<std::chrono::seconds>(&*amount);
-        std::vector<std::expected<SendResult, std::string>> results(streams);
-        {
-            std::vector<std::jthread> threads;
-            threads.reserve(streams);
-            for (std::size_t i = 0; i < streams; ++i) {
-                threads.emplace_back([i, &accepted, &results, secs, &amount] {
-                    results[i] =
-                        secs ? send_for(accepted[i].socket, *secs)
-                             : send_bytes(accepted[i].socket, std::get<std::uint64_t>(*amount));
-                });
-            }
-        }
-
-        bool has_error = false;
-        for (const auto &res: results) {
-            if (!res) {
-                std::println(stderr, "{}", res.error());
-                has_error = true;
-            }
-        }
-        if (has_error) {
-            return 1;
-        }
-
-        std::uint64_t total_sent = 0;
-        std::chrono::steady_clock::duration max_last_send{};
-        std::chrono::steady_clock::duration max_peer_done{};
-        std::uint64_t total_reported = 0;
-        std::chrono::microseconds max_reported_elapsed{};
-
-        for (const auto &res: results) {
-            total_sent += res->bytes;
-            max_last_send = std::max(max_last_send, res->last_send);
-            max_peer_done = std::max(max_peer_done, res->peer_done);
-            total_reported += res->report.bytes;
-            max_reported_elapsed = std::max(max_reported_elapsed, res->report.elapsed);
-        }
-
-        std::chrono::duration<double> last_send = max_last_send;
-        std::chrono::duration<double> peer_done = max_peer_done;
-        std::chrono::duration<double> reported_elapsed = max_reported_elapsed;
-
-        std::println("last send returned: {}", format_transfer(total_sent, last_send));
-        std::println("receiver finished:  {}", format_transfer(total_sent, peer_done));
-        std::println("receiver counted:   {}", format_transfer(total_reported, reported_elapsed));
         return 0;
     }
 

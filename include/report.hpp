@@ -1,7 +1,10 @@
 #pragma once
 
 #include "socket.hpp"
+
 #include <chrono>
+#include <string>
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 

@@ -1,18 +1,18 @@
 #include "sender.hpp"
+
 #include "receiver.hpp"
 #include "report.hpp"
 #include "speedtest.hpp"
 
-#include <chrono>
-#include <expected>
-#include <system_error>
-#include <format>
 #include <cerrno>
+#include <chrono>
 #include <cstddef>
-#include <algorithm>
 #include <cstdint>
+#include <expected>
+#include <format>
 #include <memory>
 #include <sys/socket.h>
+#include <system_error>
 
 #ifdef MSG_NOSIGNAL
 constexpr int SEND_FLAGS = MSG_NOSIGNAL;
@@ -45,7 +45,7 @@ std::expected<void, std::string> send_all(Socket &sock, std::span<const char> da
         }
     }
 
-    return {}; // great succes!
+    return {};
 }
 
 namespace {
@@ -76,28 +76,6 @@ std::expected<SendResult, std::string> finish_send(Socket &sock, std::uint64_t s
         .bytes = sent, .last_send = last_send, .peer_done = peer_done, .report = *report};
 }
 } // namespace
-
-std::expected<SendResult, std::string> send_bytes(Socket &sock, std::uint64_t total)
-{
-    std::uint64_t sent = 0;
-    auto buffer = std::make_unique<char[]>(BUFFER_SIZE);
-
-    auto start = std::chrono::steady_clock::now();
-
-    while (sent < total) {
-        std::size_t chunk = static_cast<std::size_t>(
-            std::min(total - sent, static_cast<std::uint64_t>(BUFFER_SIZE)));
-
-        auto send = send_all(sock, std::span<const char>{buffer.get(), chunk});
-        if (!send) {
-            return std::unexpected(
-                std::format("send failed after {} of {} bytes: {}", sent, total, send.error()));
-        }
-        sent += chunk;
-    }
-
-    return finish_send(sock, sent, start);
-}
 
 std::expected<SendResult, std::string> send_for(Socket &sock, std::chrono::seconds duration)
 {
