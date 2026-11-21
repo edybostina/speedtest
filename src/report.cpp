@@ -2,10 +2,9 @@
 
 #include "receiver.hpp"
 #include "sender.hpp"
+#include "wire.hpp"
 
-#include <algorithm>
 #include <array>
-#include <bit>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
@@ -16,28 +15,6 @@
 #include <span>
 #include <sys/socket.h>
 #include <system_error>
-
-namespace {
-void put_u64(std::span<char, 8> out, std::uint64_t value)
-{
-    if (std::endian::native == std::endian::little) {
-        value = std::byteswap(value);
-    }
-    auto arr = std::bit_cast<std::array<char, 8>>(value);
-    std::ranges::copy(arr, out.begin());
-}
-
-std::uint64_t get_u64(std::span<const char, 8> in)
-{
-    std::array<char, 8> arr{};
-    std::ranges::copy(in, arr.begin());
-    auto value = std::bit_cast<std::uint64_t>(arr);
-    if (std::endian::native == std::endian::little) {
-        value = std::byteswap(value);
-    }
-    return value;
-}
-} // namespace
 
 std::expected<void, std::string> send_report(Socket &sock, const StreamReport &report)
 {

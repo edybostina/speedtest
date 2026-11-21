@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <expected>
 #include <format>
 
 std::expected<void, std::string> send_request(Socket &sock, const TestRequest &request)
@@ -36,14 +37,19 @@ std::expected<TestRequest, std::string> read_request(Socket &sock)
         return std::unexpected("not a speedtest client");
     }
 
-    if (req[4] != 'u' && req[4] != 'd') {
-        return std::unexpected("bad direction");
+    auto dir = parse_direction(req[4]);
+    if (!dir) {
+        return std::unexpected(dir.error());
     }
 
     unsigned char streams = static_cast<unsigned char>(req[5]);
 
     if (streams < 1 || streams > 16) {
         return std::unexpected(std::format("bad stream count: {}", streams));
+    }
+
+    if (dir == Direction::latency && streams != 1) {
+        return std::unexpected("latency test uses only 1 stream");
     }
 
     std::array<char, 2> d_raw{};
@@ -59,7 +65,7 @@ std::expected<TestRequest, std::string> read_request(Socket &sock)
         return std::unexpected(std::format("bad duration: {} s", duration));
     }
 
-    return TestRequest{.direction = static_cast<Direction>(req[4]),
+    return TestRequest{.direction = dir.value(),
                        .streams = streams,
                        .duration =
                            std::chrono::seconds{static_cast<std::chrono::seconds::rep>(duration)}};

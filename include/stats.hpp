@@ -12,3 +12,4 @@ struct RateStats {
 };
 
 std::optional<RateStats> summarize(std::span<const double> rates);
+std::optional<double> jitter(std::span<const double> values);

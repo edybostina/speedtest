@@ -65,6 +65,7 @@ struct Connected {
     std::chrono::steady_clock::duration handshake;
 };
 
+std::expected<void, std::string> set_no_delay(Socket &sock);
 std::expected<Connected, std::string> connect_to(const std::string &host, const std::string &port,
                                                  int rcvbuf = 0);
 std::expected<Socket, std::string> listen_on(const std::string &port);

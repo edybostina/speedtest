@@ -10,6 +10,21 @@
 #include <sys/socket.h>
 #include <system_error>
 #include <utility>
+#include <netinet/tcp.h>
+
+std::expected<void, std::string> set_no_delay(Socket &sock)
+{
+    int opt = 1;
+    int rc = ::setsockopt(sock.get(), IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
+
+    if (rc < 0) {
+        int err = errno;
+        return std::unexpected(
+            std::format("TCP_NODELAY failed: {}", std::system_category().message(err)));
+    }
+
+    return {};
+}
 
 std::expected<Connected, std::string> connect_to(const std::string &host, const std::string &port,
                                                  int rcvbuf)

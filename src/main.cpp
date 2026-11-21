@@ -1,6 +1,8 @@
+#include "latency.hpp"
 #include "request.hpp"
 #include "session.hpp"
 #include "socket.hpp"
+#include "stats.hpp"
 #include "units.hpp"
 
 #include <algorithm>
@@ -20,7 +22,8 @@ namespace {
 constexpr std::string_view USAGE =
     "usage: speedtest serve PORT\n"
     "       speedtest down HOST PORT SECONDSs [OMITs] [STREAMS] [BUFk|BUFm]\n"
-    "       speedtest up HOST PORT SECONDSs [OMITs] [STREAMS]";
+    "       speedtest up HOST PORT SECONDSs [OMITs] [STREAMS]\n"
+    "       speedtest ping HOST PORT SECONDSs";
 
 std::optional<int> parse_size(std::string_view text)
 {
@@ -264,15 +267,26 @@ int main(int argc, char *argv[])
                 continue;
             }
 
-            std::string direction =
-                first_req->direction == Direction::download ? "download" : "upload";
+            std::string_view direction = direction_name(first_req->direction);
             std::println("test from {}: {}, {} streams, {} s", first_acc->peer, direction,
                          +first_req->streams, first_req->duration.count());
 
             if (first_req->direction == Direction::download) {
                 run_send(sockets, first_req->duration, std::nullopt);
-            } else {
+            } else if (first_req->direction == Direction::upload) {
                 run_receive(sockets, std::chrono::seconds{0}, first_req->duration);
+            } else if (first_req->direction == Direction::latency) {
+                auto nd = set_no_delay(sockets[0]);
+                if (!nd) {
+                    std::println(stderr, "{}", nd.error());
+                } else {
+                    auto res = echo_probes(sockets[0]);
+                    if (!res) {
+                        std::println(stderr, "{}", res.error());
+                    } else {
+                        std::println("echoed {} probes", *res);
+                    }
+                }
             }
 
             std::fflush(stdout);
@@ -377,6 +391,51 @@ int main(int argc, char *argv[])
         }
 
         return run_send(conn->sockets, *duration, opts->omit);
+    }
+
+    if (mode == "ping") {
+        if (argc != 5) {
+            print_usage();
+            return 2;
+        }
+
+        const std::string host = argv[2];
+        const std::string port = argv[3];
+
+        auto duration = parse_seconds(argv[4], 1, 3600);
+        if (!duration) {
+            print_usage();
+            return 2;
+        }
+
+        TestRequest request{.direction = Direction::latency, .streams = 1, .duration = *duration};
+
+        auto conn = connect_streams(host, port, request, 0);
+        if (!conn) {
+            std::println(stderr, "{}", conn.error());
+            return 1;
+        }
+
+        auto nd = set_no_delay(conn->sockets[0]);
+        if (!nd) {
+            std::println(stderr, "{}", nd.error());
+            return 1;
+        }
+
+        auto rtts = measure_latency(conn->sockets[0], *duration);
+        if (!rtts) {
+            std::println(stderr, "{}", rtts.error());
+            return 1;
+        }
+
+        auto stats = summarize(*rtts);
+        if (stats) {
+            auto jit = jitter(*rtts);
+            std::string jitter_str = jit ? std::format("{:.3f} ms", *jit) : "n/a";
+            std::println("latency: {} probes, min {:.3f}, median {:.3f}, max {:.3f} ms, jitter {}",
+                         stats->samples, stats->min, stats->median, stats->max, jitter_str);
+        }
+        return 0;
     }
 
     print_usage();
