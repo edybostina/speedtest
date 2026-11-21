@@ -1,6 +1,5 @@
 #pragma once
 
-#include "report.hpp"
 #include "socket.hpp"
 #include "speedtest.hpp"
 
@@ -13,8 +12,6 @@
 struct SendResult {
     std::uint64_t bytes;
     std::chrono::steady_clock::duration last_send;
-    std::chrono::steady_clock::duration peer_done;
-    StreamReport report;
 };
 
 std::expected<void, std::string> send_all(Socket &sock, std::span<const char> data);

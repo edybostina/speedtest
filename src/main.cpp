@@ -20,7 +20,7 @@ namespace {
 constexpr std::string_view USAGE =
     "usage: speedtest serve PORT\n"
     "       speedtest down HOST PORT SECONDSs [OMITs] [STREAMS] [BUFk|BUFm]\n"
-    "       speedtest up HOST PORT SECONDSs [STREAMS]";
+    "       speedtest up HOST PORT SECONDSs [OMITs] [STREAMS]";
 
 std::optional<int> parse_size(std::string_view text)
 {
@@ -270,9 +270,9 @@ int main(int argc, char *argv[])
                          +first_req->streams, first_req->duration.count());
 
             if (first_req->direction == Direction::download) {
-                run_send(sockets, first_req->duration);
+                run_send(sockets, first_req->duration, std::nullopt);
             } else {
-                run_receive(sockets, std::chrono::seconds{0});
+                run_receive(sockets, std::chrono::seconds{0}, first_req->duration);
             }
 
             std::fflush(stdout);
@@ -323,7 +323,7 @@ int main(int argc, char *argv[])
             std::println(stderr, "receive buffer: {} bytes (kernel default)", *initial_buf);
         }
 
-        if (int rc = run_receive(conn->sockets, opts->omit); rc != 0) {
+        if (int rc = run_receive(conn->sockets, opts->omit, std::nullopt); rc != 0) {
             return rc;
         }
 
@@ -346,7 +346,7 @@ int main(int argc, char *argv[])
     }
 
     if (mode == "up") {
-        if (argc != 5 && argc != 6) {
+        if (argc < 5 || argc > 7) {
             print_usage();
             return 2;
         }
@@ -360,18 +360,14 @@ int main(int argc, char *argv[])
             return 2;
         }
 
-        std::size_t streams = 1;
-        if (argc == 6) {
-            auto parsed_streams = parse_streams(argv[5]);
-            if (!parsed_streams) {
-                print_usage();
-                return 2;
-            }
-            streams = *parsed_streams;
+        auto opts = parse_recv_options({argv + 5, argv + argc});
+        if (!opts || opts->rcvbuf != 0) {
+            print_usage();
+            return 2;
         }
 
         TestRequest request{.direction = Direction::upload,
-                            .streams = static_cast<std::uint8_t>(streams),
+                            .streams = static_cast<std::uint8_t>(opts->streams),
                             .duration = *duration};
 
         auto conn = connect_streams(host, port, request, 0);
@@ -380,7 +376,7 @@ int main(int argc, char *argv[])
             return 1;
         }
 
-        return run_send(conn->sockets, *duration);
+        return run_send(conn->sockets, *duration, opts->omit);
     }
 
     print_usage();

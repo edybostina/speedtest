@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <optional>
 #include <print>
 #include <string_view>
 #include <thread>
@@ -22,30 +23,114 @@ void print_build_note()
 #endif
 }
 
-int run_send(std::span<Socket> sockets, std::chrono::seconds duration)
+namespace {
+class IntervalLog
+{
+public:
+    explicit IntervalLog(std::chrono::seconds omit): omit_(omit) {}
+
+    void add(const IntervalReport &interval)
+    {
+        double rate = megabits_per_second(interval.bytes, interval.end - interval.start);
+        const std::string_view suffix = interval.start < omit_ ? " (omitted)" : "";
+        std::println("{:7.3f}-{:7.3f} s {:12} bytes {:10.2f} Mbit/s{}", interval.start.count(),
+                     interval.end.count(), interval.bytes, rate, suffix);
+
+        if (interval.start >= omit_) {
+            kept_bytes_ += interval.bytes;
+            kept_time_ += interval.end - interval.start;
+            if (interval.end - interval.start >= std::chrono::duration<double>{0.5}) {
+                kept_rates_.push_back(rate);
+            }
+        }
+    }
+
+    void print_summary(std::uint64_t bytes, std::chrono::duration<double> elapsed) const
+    {
+        std::println("{}", format_transfer(bytes, elapsed));
+        if (omit_.count() > 0) {
+            if (kept_time_.count() > 0) {
+                std::println("after omitting {} s: {}", omit_.count(),
+                             format_transfer(kept_bytes_, kept_time_));
+            } else {
+                std::println("after omitting {} s: nothing left to measure", omit_.count());
+            }
+        }
+
+        if (auto stats = summarize(kept_rates_)) {
+            std::println("per-second: {} samples, min {:.2f}, median {:.2f}, max {:.2f} Mbit/s",
+                         stats->samples, stats->min, stats->median, stats->max);
+        }
+    }
+
+private:
+    std::chrono::seconds omit_{0};
+    std::uint64_t kept_bytes_{0};
+    std::chrono::duration<double> kept_time_{0};
+    std::vector<double> kept_rates_{};
+};
+} // namespace
+
+int run_send(std::span<Socket> sockets, std::chrono::seconds duration,
+             std::optional<std::chrono::seconds> omit)
 {
     print_build_note();
 
-    std::size_t streams = sockets.size();
-    std::vector<std::expected<SendResult, std::string>> results(streams);
+    auto start = std::chrono::steady_clock::now();
+    bool live = omit.has_value();
+    IntervalLog log{omit.value_or(std::chrono::seconds{0})};
+
+    std::size_t n = sockets.size();
+    std::vector<std::expected<SendResult, std::string>> sent(n);
+    std::vector<std::expected<StreamReport, std::string>> reports(n);
+    std::vector<std::chrono::steady_clock::duration> peer_done(n);
+
     {
         std::vector<std::jthread> threads;
-        threads.reserve(streams);
-        for (std::size_t i = 0; i < streams; ++i) {
-            threads.emplace_back(
-                [i, &sockets, &results, duration] { results[i] = send_for(sockets[i], duration); });
+        threads.reserve(n + (live ? 1 : 0));
+
+        if (live) {
+            threads.emplace_back([&sockets, &reports, &peer_done, &log, start] {
+                reports[0] = read_report(
+                    sockets[0], [&log](const IntervalReport &interval) { log.add(interval); });
+                peer_done[0] = std::chrono::steady_clock::now() - start;
+            });
+        }
+
+        for (std::size_t i = 0; i < n; ++i) {
+            threads.emplace_back([i, &sockets, &sent, &reports, &peer_done, duration, live, start] {
+                sent[i] = send_for(sockets[i], duration);
+                if (sent[i] && !(live && i == 0)) {
+                    reports[i] = read_report(sockets[i]);
+                    peer_done[i] = std::chrono::steady_clock::now() - start;
+                }
+            });
         }
     }
 
     bool has_error = false;
-    for (const auto &res: results) {
+    for (const auto &res: sent) {
         if (!res) {
             std::println(stderr, "{}", res.error());
             has_error = true;
         }
     }
+    for (const auto &res: reports) {
+        if (!res) {
+            std::println(stderr, "receiver report failed: {}", res.error());
+            has_error = true;
+        }
+    }
     if (has_error) {
         return 1;
+    }
+
+    for (std::size_t i = 0; i < n; ++i) {
+        if (reports[i]->bytes != sent[i]->bytes) {
+            std::println(stderr, "stream {}: receiver counted {} of {} bytes", i, reports[i]->bytes,
+                         sent[i]->bytes);
+            return 1;
+        }
     }
 
     std::uint64_t total_sent = 0;
@@ -54,50 +139,54 @@ int run_send(std::span<Socket> sockets, std::chrono::seconds duration)
     std::uint64_t total_reported = 0;
     std::chrono::microseconds max_reported_elapsed{};
 
-    for (const auto &res: results) {
-        total_sent += res->bytes;
-        max_last_send = std::max(max_last_send, res->last_send);
-        max_peer_done = std::max(max_peer_done, res->peer_done);
-        total_reported += res->report.bytes;
-        max_reported_elapsed = std::max(max_reported_elapsed, res->report.elapsed);
+    for (std::size_t i = 0; i < n; ++i) {
+        total_sent += sent[i]->bytes;
+        max_last_send = std::max(max_last_send, sent[i]->last_send);
+        max_peer_done = std::max(max_peer_done, peer_done[i]);
+        total_reported += reports[i]->bytes;
+        max_reported_elapsed = std::max(max_reported_elapsed, reports[i]->elapsed);
     }
 
-    std::chrono::duration<double> last_send = max_last_send;
-    std::chrono::duration<double> peer_done = max_peer_done;
-    std::chrono::duration<double> reported_elapsed = max_reported_elapsed;
+    if (live) {
+        log.print_summary(total_reported, max_reported_elapsed);
+    } else {
+        std::chrono::duration<double> last_send = max_last_send;
+        std::chrono::duration<double> peer_done = max_peer_done;
+        std::chrono::duration<double> reported_elapsed = max_reported_elapsed;
 
-    std::println("last send returned: {}", format_transfer(total_sent, last_send));
-    std::println("receiver finished:  {}", format_transfer(total_sent, peer_done));
-    std::println("receiver counted:   {}", format_transfer(total_reported, reported_elapsed));
+        std::println("last send returned: {}", format_transfer(total_sent, last_send));
+        std::println("receiver finished:  {}", format_transfer(total_sent, peer_done));
+        std::println("receiver counted:   {}", format_transfer(total_reported, reported_elapsed));
+    }
     return 0;
 }
 
-int run_receive(std::span<Socket> sockets, std::chrono::seconds omit)
+int run_receive(std::span<Socket> sockets, std::chrono::seconds omit,
+                std::optional<std::chrono::seconds> requested)
 {
-    std::uint64_t kept_bytes = 0;
-    std::chrono::duration<double> kept_time{0};
-    std::vector<double> kept_rates;
+    print_build_note();
 
-    auto print_interval = [&kept_bytes, &kept_time, &kept_rates,
-                           &omit](const IntervalReport &report) {
-        double rate = megabits_per_second(report.bytes, report.end - report.start);
-        const std::string_view suffix = report.start < omit ? " (omitted)" : "";
-        std::println("{:7.3f}-{:7.3f} s {:12} bytes {:10.2f} Mbit/s{}", report.start.count(),
-                     report.end.count(), report.bytes, rate, suffix);
+    IntervalLog log{omit};
+    std::optional<std::string> send_error;
 
-        if (report.start >= omit) {
-            kept_bytes += report.bytes;
-            kept_time += report.end - report.start;
-            if (report.end - report.start >= std::chrono::duration<double>{0.5}) {
-                kept_rates.push_back(rate);
+    auto callback = [&](const IntervalReport &interval) {
+        log.add(interval);
+        if (requested.has_value() && !send_error.has_value()) {
+            auto res = send_interval(sockets[0], interval);
+            if (!res) {
+                send_error = res.error();
             }
         }
     };
 
-    print_build_note();
-    auto result = receive(sockets, print_interval);
+    auto result = receive(sockets, callback);
     if (!result) {
         std::println(stderr, "{}", result.error());
+        return 1;
+    }
+
+    if (send_error.has_value()) {
+        std::println(stderr, "live report failed: {}", *send_error);
         return 1;
     }
 
@@ -113,22 +202,15 @@ int run_receive(std::span<Socket> sockets, std::chrono::seconds omit)
         }
     }
 
-    std::uint64_t bytes = result->bytes;
-    std::chrono::duration<double> seconds = result->elapsed;
+    log.print_summary(result->bytes, result->elapsed);
 
-    std::println("{}", format_transfer(bytes, seconds));
-    if (omit.count() > 0) {
-        if (kept_time.count() > 0) {
-            std::println("after omitting {} s: {}", omit.count(),
-                         format_transfer(kept_bytes, kept_time));
-        } else {
-            std::println("after omitting {} s: nothing left to measure", omit.count());
+    if (requested.has_value()) {
+        std::chrono::duration<double> req_sec = *requested;
+        std::chrono::duration<double> elapsed_sec = result->elapsed;
+        if (elapsed_sec < 0.9 * req_sec) {
+            std::println("warning: test ended after {:.3f} s of {} s requested",
+                         elapsed_sec.count(), requested->count());
         }
-    }
-
-    if (auto stats = summarize(kept_rates)) {
-        std::println("per-second: {} samples, min {:.2f}, median {:.2f}, max {:.2f} Mbit/s",
-                     stats->samples, stats->min, stats->median, stats->max);
     }
 
     return 0;
